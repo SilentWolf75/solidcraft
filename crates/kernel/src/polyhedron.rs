@@ -916,4 +916,24 @@ mod rim_preflight_tests {
         let vol = crate::measure(&s).unwrap().volume;
         assert!(vol.is_finite() && vol > 0.0 && vol < before, "before {before}, shell {vol}");
     }
+
+    /// Robustness seed 69 (#142): a 90° revolve with a joined box, shelled twice. Cylinder
+    /// halves on the cavity wall used to leave a seam corner the second shell refused.
+    #[test]
+    fn shell_revolved_section_with_joined_box_twice() {
+        use solidcraft_geom::{Loop2, Plane, Region2, Vec2};
+        let rect = Loop2::polygon(&[Vec2::new(2.5, 0.0), Vec2::new(22.5, 0.0), Vec2::new(22.5, 30.0), Vec2::new(2.5, 30.0)]);
+        let rev = crate::revolve(&Plane::XZ, &[Region2 { outer: rect, holes: vec![] }], Vec2::ZERO, Vec2::Y, std::f64::consts::FRAC_PI_2)
+            .unwrap()
+            .remove(0);
+        let boxb = crate::box_solid(Vec3::new(22.5, 17.5, -7.5), Vec3::new(45.0, 25.0, -2.5)).unwrap();
+        let u = crate::boolean(&rev, &boxb, crate::BoolOp::Union).unwrap().unwrap();
+        let s1 = shell(&u, &[Vec3::new(33.75, 17.5, -5.0)], 1.5).expect("first shell");
+        assert!(s1.validity().is_empty(), "{:?}", s1.validity());
+        let s2 = shell(&s1, &[Vec3::new(1.5, 12.327229847555518, -15.0)], 1.5).expect("second shell");
+        assert!(s2.validity().is_empty(), "{:?}", s2.validity());
+        assert_eq!(s2.shell_count(), 1);
+        let vol = crate::measure(&s2).unwrap().volume;
+        assert!(vol.is_finite() && vol > 0.0);
+    }
 }

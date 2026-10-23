@@ -97,3 +97,26 @@ fn shell_box_with_side_cylinder_seam_saddle() {
     run(&mut s, "solid.shell", json!({"faces": [[23.75, 22.5, 0.0]], "thickness": 1.0}));
     sound(&s);
 }
+
+/// Seed 69 (minimised, #142): a 90° revolve with a joined box, shelled twice. The second shell
+/// used to refuse a corner on the revolved wall.
+#[test]
+fn shell_revolved_section_with_joined_box_twice() {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XZ"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [2.5, 0.0], "p1": [22.5, 30.0]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.revolve", json!({"angle": "90 deg", "axis": "Z"}));
+    run(
+        &mut s,
+        "solid.box",
+        json!({"corner": [22.5, 17.5, -7.5], "height": 5.0, "length": 22.5, "operation": "join", "width": 7.5}),
+    );
+    run(&mut s, "solid.shell", json!({"faces": [[33.75, 17.5, -5.0]], "thickness": 1.5}));
+    run(
+        &mut s,
+        "solid.shell",
+        json!({"faces": [[1.5, 12.327229847555518, -15.0]], "thickness": 1.5}),
+    );
+    sound(&s);
+}

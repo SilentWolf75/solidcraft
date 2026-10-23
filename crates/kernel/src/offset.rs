@@ -791,10 +791,8 @@ fn merge_adjacent_cylinders(b: &Body) -> Option<(Body, Vec<Vec<usize>>)> {
     merge_adjacent_cylinders_result(b).ok()
 }
 
-fn merge_adjacent_cylinders_result(b: &Body) -> std::result::Result<(Body, Vec<Vec<usize>>), String> {
-    let faces: Vec<mt::Face> = b.solid.face_iter().cloned().collect();
-    let size = b.size();
-    let tol = (size * 1e-7).max(1e-9);
+/// Join edge-connected co-cylindrical faces inside one shell. `None` when nothing merges.
+fn merge_cylinders_in_faces(faces: &[mt::Face], tol: f64) -> std::result::Result<Option<(Vec<mt::Face>, Vec<Vec<usize>>)>, String> {
     let surfs: Vec<Option<Surf>> = faces.iter().map(|f| surf_of(f, tol * 100.0)).collect();
     let mut parent: Vec<usize> = (0..faces.len()).collect();
     let find = |parent: &mut [usize], mut x: usize| {
@@ -813,17 +811,13 @@ fn merge_adjacent_cylinders_result(b: &Body) -> std::result::Result<(Body, Vec<V
         }
     }
     let mut merged_any = false;
-    let mut cand = 0usize;
     for fs in by_edge.values() {
         if let [a, b] = fs[..]
             && a != b
             && let (Some(Some(sa)), Some(Some(sb))) = (surfs.get(a), surfs.get(b))
             && matches!(sa, Surf::Cylinder { .. })
+            && same_surf(sa, sb, tol * 100.0)
         {
-            cand += 1;
-            if !same_surf(sa, sb, tol * 100.0) {
-                continue;
-            }
             let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
             if ra != rb {
                 if let Some(x) = parent.get_mut(ra.max(rb)) {
@@ -834,7 +828,7 @@ fn merge_adjacent_cylinders_result(b: &Body) -> std::result::Result<(Body, Vec<V
         }
     }
     if !merged_any {
-        return Err(format!("no merge cand={cand} faces={}", faces.len()));
+        return Ok(None);
     }
     let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
     for i in 0..faces.len() {
@@ -891,9 +885,42 @@ fn merge_adjacent_cylinders_result(b: &Body) -> std::result::Result<(Body, Vec<V
         out.push(mt::Face::try_new(wires, surface).map_err(|e| format!("face try_new: {e}"))?);
         from.push(members.clone());
     }
-    let shell: mt::Shell = out.into();
-    // Keep every shell the body had: only the faces were merged.
-    let solid = mt::Solid::try_new(vec![shell]).map_err(|e| format!("solid: {e}"))?;
+    Ok(Some((out, from)))
+}
+
+fn merge_adjacent_cylinders_result(b: &Body) -> std::result::Result<(Body, Vec<Vec<usize>>), String> {
+    let size = b.size();
+    let tol = (size * 1e-7).max(1e-9);
+    // Merge inside each boundary on its own. A shelled body has several shells; folding them
+    // into one makes an unconnected shell (#142).
+    let mut out_shells: Vec<mt::Shell> = Vec::new();
+    let mut from: Vec<Vec<usize>> = Vec::new();
+    let mut merged_any = false;
+    let mut index_base = 0usize;
+    for sh in b.solid.boundaries() {
+        let faces: Vec<mt::Face> = sh.face_iter().cloned().collect();
+        let n = faces.len();
+        match merge_cylinders_in_faces(&faces, tol)? {
+            Some((merged, local_from)) => {
+                merged_any = true;
+                for members in local_from {
+                    from.push(members.into_iter().map(|i| i + index_base).collect());
+                }
+                out_shells.push(merged.into());
+            }
+            None => {
+                for i in 0..n {
+                    from.push(vec![index_base + i]);
+                }
+                out_shells.push(faces.into());
+            }
+        }
+        index_base += n;
+    }
+    if !merged_any {
+        return Err(format!("no merge faces={index_base} shells={}", out_shells.len()));
+    }
+    let solid = mt::Solid::try_new(out_shells).map_err(|e| format!("solid: {e}"))?;
     let body = Body::new(solid).map_err(|e| format!("body: {e}"))?.without_history();
     Ok((body, from))
 }
@@ -948,12 +975,24 @@ fn offset_body_inner(b: &Body, shift: impl Fn(usize, Vec3) -> f64) -> Result<Bod
         }
         shifts.push(s);
     }
+    // Faces that lie on the same sheet (cylinder halves left unmerged) are one constraint.
     let pick = |ids: &[usize]| -> (Vec<Surf>, Vec<f64>, Vec<Surf>) {
-        (
-            ids.iter().filter_map(|i| old.get(*i).copied()).collect(),
-            ids.iter().filter_map(|i| shifts.get(*i).copied()).collect(),
-            ids.iter().filter_map(|i| new.get(*i).copied()).collect(),
-        )
+        let st = size * 1e-9;
+        let mut o = Vec::new();
+        let mut s = Vec::new();
+        let mut n = Vec::new();
+        for i in ids {
+            let (Some(oi), Some(si), Some(ni)) = (old.get(*i).copied(), shifts.get(*i).copied(), new.get(*i).copied()) else {
+                continue;
+            };
+            if o.iter().any(|u| same_surf(u, &oi, st)) {
+                continue;
+            }
+            o.push(oi);
+            s.push(si);
+            n.push(ni);
+        }
+        (o, s, n)
     };
     // Vertex → its faces; edge → its faces.
     let mut vfaces: HashMap<mt::VertexID, Vec<usize>> = HashMap::new();
