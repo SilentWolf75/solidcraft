@@ -639,7 +639,15 @@ fn shell_opened(b: &Body, healed: &Body, open: &[Vec3], opened: &[usize], thickn
     // and the opening is the open face's copy swept out through the body.
     let cavity = match offset_planar(healed, |fi, _| if opened.contains(&fi) { margin } else { -thickness }) {
         Ok(c) => c,
-        Err(e) => return shell_by_opening(healed, opened, thickness, margin).map_err(|_| e),
+        // Pushing the open face out can miss a corner when that face meets a thin round
+        // (seed 38): the all-inward fallback names the wall-thickness limit instead.
+        Err(e) => {
+            return match shell_by_opening(healed, opened, thickness, margin) {
+                Ok(body) => Ok(body),
+                Err(e2) if shell_fallback_names_limit(&e2) => Err(e2),
+                Err(_) => Err(e),
+            };
+        }
     };
     let cavity = match opening_overreach(healed, &cavity, opened, thickness, margin) {
         Ok(Some(trimmed)) => trimmed,
@@ -796,6 +804,13 @@ fn unsupported_shell(m: &str) -> KernelError {
     KernelError::Failed(format!("not supported yet: {m}"))
 }
 
+/// Whether a shell fallback's error is the real limit (thin wall / unsupported) rather than a
+/// secondary boolean failure that would hide the first offset's corner message.
+fn shell_fallback_names_limit(e: &KernelError) -> bool {
+    let s = e.to_string();
+    s.contains("faces would cross") || s.contains("not supported yet") || s.contains("rim would have no thickness")
+}
+
 pub(crate) fn point_tri(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f64 {
     let n = (b - a).cross(c - a);
     let Some(nn) = n.normalized() else { return f64::INFINITY };
@@ -915,6 +930,22 @@ mod rim_preflight_tests {
         assert_eq!(s.shell_count(), 1);
         let vol = crate::measure(&s).unwrap().volume;
         assert!(vol.is_finite() && vol > 0.0 && vol < before, "before {before}, shell {vol}");
+    }
+
+    /// Robustness seed 38 (#142): a cylindrical notch on a box edge shells at half a millimetre;
+    /// at 2 mm (thicker than the notch) it is refused as a wall cross, not a missed corner.
+    #[test]
+    fn shell_box_with_edge_notch() {
+        let b = crate::box_solid(Vec3::ZERO, Vec3::new(47.5, 60.0, 27.5)).unwrap();
+        let c = crate::cylinder(Vec3::new(47.5, 0.0, 25.0), Vec3::new(0.0, 0.0, -1.0), 1.25, 22.5).unwrap();
+        let u = crate::boolean(&b, &c, crate::BoolOp::Cut).unwrap().unwrap();
+        let open = [Vec3::new(47.5, 30.509393063583815, 13.75)];
+        let thin = shell(&u, &open, 0.5).expect("thin shell");
+        assert!(thin.validity().is_empty(), "{:?}", thin.validity());
+        let err = shell(&u, &open, 2.0).expect_err("thick shell");
+        let msg = err.to_string();
+        assert!(msg.contains("faces would cross"), "{msg}");
+        assert!(!msg.contains("don't meet the same way"), "{msg}");
     }
 
     /// Robustness seed 69 (#142): a 90° revolve with a joined box, shelled twice. Cylinder

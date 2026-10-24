@@ -98,6 +98,25 @@ fn shell_box_with_side_cylinder_seam_saddle() {
     sound(&s);
 }
 
+/// Seed 38 (minimised, #142): a cylindrical notch on a box edge. A shell thicker than the notch
+/// used to look like a missed corner; it is refused as a wall cross.
+#[test]
+fn shell_box_with_edge_notch_names_wall_cross() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"height": 27.5, "length": 47.5, "width": 60.0}));
+    run(
+        &mut s,
+        "solid.cylinder",
+        json!({"axis": [0.0, 0.0, -1.0], "base": [47.5, 0.0, 25.0], "height": 22.5, "operation": "cut", "radius": 1.25}),
+    );
+    let err = s
+        .execute("solid.shell", &json!({"faces": [[47.5, 30.509393063583815, 13.75]], "thickness": 2.0}))
+        .expect_err("thick shell");
+    let msg = err.to_string();
+    assert!(msg.contains("faces would cross"), "{msg}");
+    assert!(!msg.contains("don't meet the same way"), "{msg}");
+}
+
 /// Seed 69 (minimised, #142): a 90° revolve with a joined box, shelled twice. The second shell
 /// used to refuse a corner on the revolved wall.
 #[test]
