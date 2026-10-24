@@ -1727,8 +1727,19 @@ pub(crate) fn draft_walls(b: &Body, chosen: &[usize], neutral: &solidcraft_geom:
 }
 
 /// The chosen faces and every face on the same surface joined to them (the halves of a hole's
-/// wall), as face indices. Pieces of a face split on purpose (Split Face) stay apart.
+/// wall, or every patch of a sphere when offsetting), as face indices. Pieces of a face split
+/// on purpose (Split Face) stay apart.
 pub fn with_same_surface(b: &Body, chosen: &[usize]) -> Vec<usize> {
+    with_same_surface_where(b, chosen, |_| true)
+}
+
+/// Like [`with_same_surface`], but only joins planar and cylindrical sheets — for shell openings
+/// where expanding every sphere (or cone/torus) patch would open the whole body (#1969).
+pub(crate) fn with_same_shell_open(b: &Body, chosen: &[usize]) -> Vec<usize> {
+    with_same_surface_where(b, chosen, |s| matches!(s, Surf::Plane { .. } | Surf::Cylinder { .. }))
+}
+
+fn with_same_surface_where(b: &Body, chosen: &[usize], allow: impl Fn(&Surf) -> bool) -> Vec<usize> {
     let faces: Vec<mt::Face> = b.solid.face_iter().cloned().collect();
     let size = b.size();
     let tol = (size * 1e-7).max(1e-9) * 100.0;
@@ -1757,6 +1768,9 @@ pub fn with_same_surface(b: &Body, chosen: &[usize]) -> Vec<usize> {
                 continue;
             }
             let Some(Some(si)) = surfs.get(i) else { continue };
+            if !allow(si) {
+                continue;
+            }
             let joins = out.iter().any(|j| {
                 surfs.get(*j).and_then(|x| x.as_ref()).is_some_and(|sj| same(si, sj))
                     && faces.get(*j).is_some_and(|g| {
