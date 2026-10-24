@@ -443,8 +443,8 @@ pub(crate) fn same_surf(a: &Surf, b: &Surf, tol: f64) -> bool {
     }
 }
 
-/// Whether three (or fewer unique) moved sheets have no common point near `near`.
-fn moved_triple_misses(near: Vec3, sheets: &[Surf], size: f64) -> bool {
+/// A point near `near` on the moved sheets, when they meet (planes and cylinders).
+fn meet_moved(near: Vec3, sheets: &[Surf], size: f64) -> Option<Vec3> {
     let tol = size * 1e-9;
     let mut uniq: Vec<Surf> = Vec::new();
     for s in sheets {
@@ -453,8 +453,10 @@ fn moved_triple_misses(near: Vec3, sheets: &[Surf], size: f64) -> bool {
         }
     }
     match uniq.as_slice() {
-        [a, b, c] => meet3(near, a, b, c, size).is_none(),
-        _ => false,
+        [a, b, c] => meet3(near, a, b, c, size),
+        [a, b] => move_point(near, &[*a, *b], &[0.0, 0.0], &[*a, *b], size * 1e-6),
+        [_] => Some(near),
+        _ => None,
     }
 }
 
@@ -480,18 +482,70 @@ fn meet3(near: Vec3, a: &Surf, b: &Surf, c: &Surf, size: f64) -> Option<Vec3> {
         let x = (n1.cross(n2) * d0 + n2.cross(n0) * d1 + n0.cross(n1) * d2) * (1.0 / den);
         return (x.is_finite() && x.dist(near) <= size).then_some(x);
     }
-    // Newton onto the three surfaces (plane + plane + cylinder, and similar).
+    // Two planes and a cylinder (#566 bend): intersect the planes to a line, then the cylinder.
+    if let Some(x) = meet_two_planes_cylinder(&uniq, near, size) {
+        return Some(x);
+    }
+    // Newton onto the three surfaces (plane + cylinder + cylinder, and similar).
     let mut q = near;
+    let ok = size * 1e-6;
     for _ in 0..30 {
         let d: Vec<f64> = uniq.iter().map(|sf| sf.dist(q)).collect();
-        if d.iter().all(|x| x.abs() < tol) {
+        if d.iter().all(|x| x.abs() < ok) {
             return Some(q);
         }
         let gs: Vec<Vec3> = uniq.iter().map(|sf| sf.grad(q)).collect::<Option<_>>()?;
         let rhs: Vec<f64> = d.iter().map(|x| -x).collect();
         q += span_step(&gs, &rhs)?;
     }
-    uniq.iter().all(|sf| sf.dist(q).abs() < size * 1e-6).then_some(q).filter(|x| x.dist(near) <= size)
+    uniq.iter().all(|sf| sf.dist(q).abs() < ok).then_some(q).filter(|x| x.dist(near) <= size)
+}
+
+/// The nearer intersection of two planes and a cylinder with `near`, when `uniq` is that set.
+fn meet_two_planes_cylinder(uniq: &[Surf], near: Vec3, size: f64) -> Option<Vec3> {
+    let mut planes: Vec<(Vec3, f64)> = Vec::new();
+    let mut cyl: Option<(Vec3, Vec3, f64)> = None;
+    for s in uniq {
+        match *s {
+            Surf::Plane { n, d } => planes.push((n, d)),
+            Surf::Cylinder { o, a, r, .. } if cyl.is_none() => cyl = Some((o, a, r)),
+            _ => return None,
+        }
+    }
+    let ([(n0, d0), (n1, d1)], (o, a, r)) = (planes.as_slice(), cyl?) else { return None };
+    let dir = n0.cross(*n1);
+    let Some(dir) = dir.normalized().filter(|_| dir.len() > 1e-9) else { return None };
+    // A point on both planes: solve in the plane ⟂ dir (same as three-plane with n2 = dir, d2 = dir·near).
+    let n2 = dir;
+    let d2 = n2.dot(near);
+    let den = n0.dot(n1.cross(n2));
+    if den.abs() < 1e-9 {
+        return None;
+    }
+    let p0 = (n1.cross(n2) * *d0 + n2.cross(*n0) * *d1 + n0.cross(*n1) * d2) * (1.0 / den);
+    if !p0.is_finite() {
+        return None;
+    }
+    // Line p0 + t dir with cylinder axis (o, a), radius r: |(p0 - o) + t dir - a·…|² = r².
+    let w = p0 - o;
+    let w = w - a * w.dot(a);
+    let d = dir - a * dir.dot(a);
+    let aa = d.len2();
+    let bb = 2.0 * w.dot(d);
+    let cc = w.len2() - r * r;
+    let disc = bb * bb - 4.0 * aa * cc;
+    if !disc.is_finite() || disc < -size * 1e-6 {
+        return None;
+    }
+    let disc = disc.max(0.0);
+    if aa < 1e-18 {
+        // Line ‖ axis: on the cylinder iff |w| = r.
+        return ((w.len() - r).abs() < size * 1e-6 && p0.dist(near) <= size).then_some(p0);
+    }
+    let sqrt = disc.sqrt();
+    let t0 = (-bb - sqrt) / (2.0 * aa);
+    let t1 = (-bb + sqrt) / (2.0 * aa);
+    [p0 + dir * t0, p0 + dir * t1].into_iter().filter(|x| x.is_finite() && x.dist(near) <= size).min_by(|a, b| a.dist(near).total_cmp(&b.dist(near)))
 }
 
 /// The corners in place of a corner where more than three faces meet and whose moved surfaces
@@ -1173,7 +1227,11 @@ fn offset_body_inner(b: &Body, shift: impl Fn(usize, Vec3) -> f64) -> Result<Bod
                         let q = nodes.first().map(|x| x.0).ok_or_else(|| fail("corner"))?;
                         splits.insert(v.id(), nodes);
                         q
-                    } else if at.len() <= 3 && moved_triple_misses(p, &n, size) {
+                    } else if let Some(q) = meet_moved(p, &n, size) {
+                        // The first-order step from the old normals can miss when a concave
+                        // cylinder's gradient opposes a plane (#566); the moved sheets still meet.
+                        q
+                    } else if at.len() <= 3 && n.len() >= 2 {
                         // Three faces, no split: the moved sheets miss — a wall thinner than the
                         // move (seed 78), not a corner that needs a different construction.
                         return Err(fail("not supported yet: the move is larger than a wall or step is thick (faces would cross)"));
@@ -1715,4 +1773,30 @@ pub fn with_same_surface(b: &Body, chosen: &[usize]) -> Vec<usize> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod meet_tests {
+    use super::*;
+
+    #[test]
+    fn meet_moved_plane_cyl_plane_at_sweep_bend() {
+        let near = Vec3::new(30.000185, -2.5, -56.0);
+        let sheets = [
+            Surf::Plane { n: Vec3::new(0.0, -1.0, 0.0), d: 2.0 },
+            Surf::Cylinder {
+                o: Vec3::new(30.000694591984544, 2.5, -29.99930540801546),
+                a: Vec3::new(0.0, 1.0, 0.0),
+                r: 26.50069460126232,
+                convex: false,
+            },
+            Surf::Plane { n: Vec3::new(0.0, 0.0, 1.0), d: -56.500000004288324 },
+        ];
+        let q = meet_moved(near, &sheets, 100.0);
+        assert!(q.is_some(), "dists at near: {:?}", sheets.map(|s| s.dist(near)));
+        let q = q.expect("meet");
+        for s in &sheets {
+            assert!(s.dist(q).abs() < 1e-6, "{s:?} dist {}", s.dist(q));
+        }
+    }
 }

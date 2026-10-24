@@ -98,6 +98,30 @@ fn shell_box_with_side_cylinder_seam_saddle() {
     sound(&s);
 }
 
+/// #566: a rectangular section swept along a path with a bend. Shelling used to refuse the
+/// concave bend corner where a plane meets the inner cylinder.
+#[test]
+fn shell_swept_bar_with_a_bend() {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XZ", "name": "Path"}));
+    run(&mut s, "sketch.line", json!({"points": [[0.0, 0.0], [0.0, 30.0]], "ids": ["l1"]}));
+    run(
+        &mut s,
+        "sketch.arc.three_point",
+        json!({"start": "l1.end", "through": [8.787, 51.213], "end": [30.0, 60.0], "id": "a1"}),
+    );
+    run(&mut s, "sketch.line", json!({"points": ["a1.end", [60.0, 60.0]], "ids": ["l2"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Section"}));
+    run(&mut s, "sketch.rectangle.center", json!({"center": [0.0, 0.0], "corner": [4.0, 2.5]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.sweep", json!({"sketch": "Section", "path_sketch": "Path", "path": ["l1", "a1", "l2"]}));
+    run(&mut s, "solid.shell", json!({"faces": [[0.0, 0.0, 0.0]], "thickness": 0.5}));
+    sound(&s);
+    let vol = volume(&s);
+    assert!(vol.is_finite() && vol > 0.0 && vol < 2000.0, "shell volume {vol}");
+}
+
 /// #4010: a plate with a through hole, shelled by opening only the hole wall. Volume is the
 /// plate less an inset box that keeps the same bore (analytic 8044.80 mm³).
 #[test]
