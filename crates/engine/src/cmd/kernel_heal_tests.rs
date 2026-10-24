@@ -40,6 +40,24 @@ fn shell_a_box_with_a_drilled_hole() {
     assert!((v_shell - want).abs() < 2e-4 * want, "{v_shell} vs {want}");
 }
 
+/// #5848: a sphere from revolving a half-disk shells with a wall (same sew as #1969).
+#[test]
+fn shell_of_a_revolved_sphere() {
+    use std::f64::consts::PI;
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XZ", "name": "Half"}));
+    run(&mut s, "sketch.arc.center_point", json!({"center": [0, 0], "start": [0, -50], "end": [0, 50]}));
+    run(&mut s, "sketch.line", json!({"points": [[0, -50], [0, 50]]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.revolve", json!({"sketch": "Half", "axis": "l1", "angle": 360, "body_name": "Ball"}));
+    let before = volume(&mut s);
+    run(&mut s, "solid.shell", json!({"body": "Ball", "faces": [[50, 0, 0]], "thickness": 10}));
+    let vol = volume(&mut s);
+    let closed = 4.0 / 3.0 * PI * (50.0f64.powi(3) - 40.0f64.powi(3));
+    assert!(vol.is_finite() && vol > 0.0 && vol < before, "before {before}, shell {vol}");
+    assert!(vol > 0.7 * closed && vol < closed, "shell {vol}, closed hollow {closed}");
+}
+
 /// #1972: after a sphere is split, shelling one half by name must hollow that half and leave
 /// the other solid — a face pick on the cut alone used to hit the other piece.
 #[test]
