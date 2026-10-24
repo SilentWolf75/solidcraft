@@ -430,7 +430,7 @@ fn span_step(ns: &[Vec3], s: &[f64]) -> Option<Vec3> {
 const MAX_SPLIT_FACES: usize = 48;
 
 /// Whether two offset surfaces are the same sheet (a cylinder split into halves, or a plane).
-fn same_surf(a: &Surf, b: &Surf, tol: f64) -> bool {
+pub(crate) fn same_surf(a: &Surf, b: &Surf, tol: f64) -> bool {
     match (*a, *b) {
         (Surf::Plane { n, d }, Surf::Plane { n: n2, d: d2 }) => n.dot(n2) > 1.0 - 1e-9 && (d - d2).abs() < tol,
         (Surf::Cylinder { o, a, r, convex }, Surf::Cylinder { o: o2, a: a2, r: r2, convex: c2 }) => {

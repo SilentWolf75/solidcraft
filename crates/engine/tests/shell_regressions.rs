@@ -98,6 +98,27 @@ fn shell_box_with_side_cylinder_seam_saddle() {
     sound(&s);
 }
 
+/// #4010: a plate with a through hole, shelled by opening only the hole wall. Volume is the
+/// plate less an inset box that keeps the same bore (analytic 8044.80 mm³).
+#[test]
+fn shell_plate_opening_the_hole_wall() {
+    let mut s = Session::default();
+    run(
+        &mut s,
+        "sketch.create",
+        json!({"plane": {"origin": [0.0, 0.0, 0.0], "x_dir": [1.0, 0.0, 0.0], "y_dir": [0.0, 1.0, 0.0]}}),
+    );
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0.0, 0.0], "p1": [40.0, 30.0]}));
+    run(&mut s, "sketch.circle.center", json!({"center": [20.0, 15.0], "radius": 5.0}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"distance": 12.5, "operation": "new", "profiles": [{"point": [2.0, 2.0]}]}));
+    run(&mut s, "solid.shell", json!({"faces": [[25.0, 15.0, 6.25]], "thickness": 2.5}));
+    sound(&s);
+    let got = volume(&s);
+    let want = 8044.80;
+    assert!((got - want).abs() < 1.0, "shell volume {got}, want ~{want}");
+}
+
 /// Seed 78 (minimised, #142): a half-revolve cut by a box. A shell thicker than the rim used to
 /// look like a missed corner; it is refused as a wall cross.
 #[test]
