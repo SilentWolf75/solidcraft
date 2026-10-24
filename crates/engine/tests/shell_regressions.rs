@@ -98,6 +98,28 @@ fn shell_box_with_side_cylinder_seam_saddle() {
     sound(&s);
 }
 
+/// Seed 78 (minimised, #142): a half-revolve cut by a box. A shell thicker than the rim used to
+/// look like a missed corner; it is refused as a wall cross.
+#[test]
+fn shell_half_revolve_cut_by_box_names_wall_cross() {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XZ"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [7.5, 0.0], "p1": [25.0, 5.0]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.revolve", json!({"angle": "180 deg", "axis": "Z"}));
+    run(
+        &mut s,
+        "solid.box",
+        json!({"corner": [-25.0, 0.0, -2.5], "height": 22.5, "length": 17.5, "operation": "cut", "width": 22.5}),
+    );
+    let err = s
+        .execute("solid.shell", &json!({"faces": [[16.25, 0.0, -2.5]], "thickness": 2.0}))
+        .expect_err("thick shell");
+    let msg = err.to_string();
+    assert!(msg.contains("faces would cross"), "{msg}");
+    assert!(!msg.contains("don't meet the same way"), "{msg}");
+}
+
 /// Seed 38 (minimised, #142): a cylindrical notch on a box edge. A shell thicker than the notch
 /// used to look like a missed corner; it is refused as a wall cross.
 #[test]

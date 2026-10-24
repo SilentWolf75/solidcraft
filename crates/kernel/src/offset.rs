@@ -443,6 +443,21 @@ fn same_surf(a: &Surf, b: &Surf, tol: f64) -> bool {
     }
 }
 
+/// Whether three (or fewer unique) moved sheets have no common point near `near`.
+fn moved_triple_misses(near: Vec3, sheets: &[Surf], size: f64) -> bool {
+    let tol = size * 1e-9;
+    let mut uniq: Vec<Surf> = Vec::new();
+    for s in sheets {
+        if !uniq.iter().any(|u| same_surf(u, s, tol)) {
+            uniq.push(*s);
+        }
+    }
+    match uniq.as_slice() {
+        [a, b, c] => meet3(near, a, b, c, size).is_none(),
+        _ => false,
+    }
+}
+
 /// A point near `near` on all three moved surfaces, or `None` when they miss (parallel planes,
 /// two halves of one cylinder with one other face, …).
 fn meet3(near: Vec3, a: &Surf, b: &Surf, c: &Surf, size: f64) -> Option<Vec3> {
@@ -1154,13 +1169,17 @@ fn offset_body_inner(b: &Body, shift: impl Fn(usize, Vec3) -> f64) -> Result<Bod
             _ => match move_point(p, &o, &s, &n, size * 1e-6) {
                 Some(q) => q,
                 None => {
-                    let nodes = (fs == *at)
-                        .then(|| split_corner(&v, at, &faces, &efaces, &old, &new, size))
-                        .flatten()
-                        .ok_or_else(|| fail("a corner whose faces don't meet the same way after the move"))?;
-                    let q = nodes.first().map(|x| x.0).ok_or_else(|| fail("corner"))?;
-                    splits.insert(v.id(), nodes);
-                    q
+                    if let Some(nodes) = (fs == *at).then(|| split_corner(&v, at, &faces, &efaces, &old, &new, size)).flatten() {
+                        let q = nodes.first().map(|x| x.0).ok_or_else(|| fail("corner"))?;
+                        splits.insert(v.id(), nodes);
+                        q
+                    } else if at.len() <= 3 && moved_triple_misses(p, &n, size) {
+                        // Three faces, no split: the moved sheets miss — a wall thinner than the
+                        // move (seed 78), not a corner that needs a different construction.
+                        return Err(fail("not supported yet: the move is larger than a wall or step is thick (faces would cross)"));
+                    } else {
+                        return Err(fail("a corner whose faces don't meet the same way after the move"));
+                    }
                 }
             },
         };

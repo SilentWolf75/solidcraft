@@ -932,6 +932,23 @@ mod rim_preflight_tests {
         assert!(vol.is_finite() && vol > 0.0 && vol < before, "before {before}, shell {vol}");
     }
 
+    /// Robustness seed 78 (#142): a half-revolve cut by a box. A shell thicker than the rim at
+    /// the cut used to look like a missed corner; it is refused as a wall cross.
+    #[test]
+    fn shell_half_revolve_cut_by_box_names_wall_cross() {
+        use solidcraft_geom::{Loop2, Plane, Region2, Vec2};
+        let rect = Loop2::polygon(&[Vec2::new(7.5, 0.0), Vec2::new(25.0, 0.0), Vec2::new(25.0, 5.0), Vec2::new(7.5, 5.0)]);
+        let rev = crate::revolve(&Plane::XZ, &[Region2 { outer: rect, holes: vec![] }], Vec2::ZERO, Vec2::Y, std::f64::consts::PI)
+            .unwrap()
+            .remove(0);
+        let cut = crate::box_solid(Vec3::new(-25.0, 0.0, -2.5), Vec3::new(-7.5, 22.5, 20.0)).unwrap();
+        let u = crate::boolean(&rev, &cut, crate::BoolOp::Cut).unwrap().unwrap();
+        let err = shell(&u, &[Vec3::new(16.25, 0.0, -2.5)], 2.0).expect_err("thick shell");
+        let msg = err.to_string();
+        assert!(msg.contains("faces would cross"), "{msg}");
+        assert!(!msg.contains("don't meet the same way"), "{msg}");
+    }
+
     /// Robustness seed 38 (#142): a cylindrical notch on a box edge shells at half a millimetre;
     /// at 2 mm (thicker than the notch) it is refused as a wall cross, not a missed corner.
     #[test]
