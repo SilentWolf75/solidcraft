@@ -40,6 +40,29 @@ fn shell_a_box_with_a_drilled_hole() {
     assert!((v_shell - want).abs() < 2e-4 * want, "{v_shell} vs {want}");
 }
 
+/// #1972: after a sphere is split, shelling one half by name must hollow that half and leave
+/// the other solid — a face pick on the cut alone used to hit the other piece.
+#[test]
+fn shell_named_half_sphere_leaves_the_other_solid() {
+    let mut s = Session::default();
+    run(&mut s, "solid.sphere", json!({"center": [0, 0, 0], "radius": 10, "body_name": "Ball"}));
+    run(&mut s, "solid.split_body", json!({"body": "Ball", "plane": "XY"}));
+    let before = run(&mut s, "inspect.measure", json!({}));
+    let v_ball = before["bodies"].as_array().unwrap().iter().find(|b| b["name"] == "Ball").unwrap()["volume_mm3"].as_f64().unwrap();
+    let v_other = before["bodies"].as_array().unwrap().iter().find(|b| b["name"] == "Ball (1)").unwrap()["volume_mm3"].as_f64().unwrap();
+    run(
+        &mut s,
+        "solid.shell",
+        json!({"body": "Ball (1)", "faces": [[5.09, 3.52, 0.0]], "thickness": 2, "tangent_chain": true}),
+    );
+    let after = run(&mut s, "inspect.measure", json!({}));
+    let bodies = after["bodies"].as_array().unwrap();
+    let ball = bodies.iter().find(|b| b["name"] == "Ball").unwrap()["volume_mm3"].as_f64().unwrap();
+    let other = bodies.iter().find(|b| b["name"] == "Ball (1)").unwrap()["volume_mm3"].as_f64().unwrap();
+    assert!((ball - v_ball).abs() < 1e-3, "Ball should stay solid: {ball} vs {v_ball}");
+    assert!(other < v_other * 0.75 && other > 0.0, "Ball (1) should be hollow: {other} vs {v_other}");
+}
+
 /// Offset Face on a cone and a sphere move them exactly.
 #[test]
 fn offset_cone_and_sphere_faces() {

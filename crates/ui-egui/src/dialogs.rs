@@ -3278,7 +3278,21 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
         }
         Kind::Shell { .. } => {
             need(0, "faces to remove")?;
-            ("solid.shell", json!({"faces": face_points(0)}))
+            // Name the body from the picked faces so eval does not guess among coincident
+            // split faces (#1972: shelling the visible half hit the hidden one).
+            let mut p = json!({"faces": face_points(0)});
+            let bodies: Vec<&str> = sels(d, 0)
+                .iter()
+                .filter_map(|s| match s {
+                    Sel::Face { body, .. } => Some(body.as_str()),
+                    Sel::Body { name } => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            if !bodies.is_empty() && bodies.iter().all(|b| *b == bodies[0]) {
+                p["body"] = json!(bodies[0]);
+            }
+            ("solid.shell", p)
         }
         Kind::Draft { .. } => {
             need(0, "faces")?;
@@ -3965,6 +3979,16 @@ pub(crate) fn edge_sel(s: &Session, p0: Vec3) -> Option<Sel> {
 
 /// The body face containing a point (nearest triangle).
 pub(crate) fn face_sel(s: &Session, p0: Vec3) -> Option<Sel> {
+    face_sel_preferring(s, p0, None)
+}
+
+/// Like [`face_sel`], but when `prefer` names a body that still has a face at the point, use
+/// that body — after a split the cut faces of both halves coincide (#1972).
+pub(crate) fn face_sel_preferring(s: &Session, p0: Vec3, prefer: Option<&str>) -> Option<Sel> {
+    face_sel_among(s, p0, prefer).or_else(|| prefer.and_then(|_| face_sel_among(s, p0, None)))
+}
+
+fn face_sel_among(s: &Session, p0: Vec3, only: Option<&str>) -> Option<Sel> {
     use solidcraft_engine::kernel::{self, FaceSurface};
 
     if !p0.is_finite() {
@@ -3974,6 +3998,14 @@ pub(crate) fn face_sel(s: &Session, p0: Vec3) -> Option<Sel> {
     let frames = stored_frames(s);
     let mut best: Option<(f64, &solidcraft_engine::doc::ModelBody, usize, Vec3)> = None;
     for b in &st.bodies {
+        // Hidden bodies stay out of refill picks so a coincident cut face of a hidden half
+        // does not steal the visible one (#1972).
+        if !s.body_visible(&b.name) {
+            continue;
+        }
+        if only.is_some_and(|n| n != b.name) {
+            continue;
+        }
         let p = stored_on(&frames, &b.name, p0);
         let m = b.mesh();
         for (t, f) in m.triangles.iter().zip(&m.tri_face) {
@@ -4329,15 +4361,19 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             d.chain_applied = false;
             d
         }
-        FeatureKind::Shell { faces, direction, tangent_chain, .. } => {
+        FeatureKind::Shell { faces, body, direction, tangent_chain, .. } => {
             let mut d = start("solid.shell")?;
             d.kind = Kind::simple_restore(&f.kind)?;
             d.extra.insert("tangent_chain".into(), json!(tangent_chain));
             if !direction.is_empty() && direction != "inside" {
                 d.extra.insert("direction".into(), json!(direction));
             }
+            if let Some(b) = body {
+                d.extra.insert("body".into(), json!(b));
+            }
             if let Some(inp) = d.inputs.first_mut() {
-                inp.items = faces.iter().filter_map(|p| face_sel(s, p.0)).collect();
+                let prefer = body.as_deref();
+                inp.items = faces.iter().filter_map(|p| face_sel_preferring(s, p.0, prefer)).collect();
             }
             d
         }
