@@ -499,6 +499,11 @@ fn shell_planar(b: &Body, open: &[Vec3], thickness: f64) -> Result<Body> {
     if let Some(shell) = shell_barrel(&healed, &opened, thickness)? {
         return Ok(record::after(shell, &healed, &record::counts(&[b])));
     }
+    // Stepped coaxial cylinders: the offset cavity's faces are valid but the Cut through the
+    // step panics in the tessellator (#6066). Build the cavity as stacked inset cylinders.
+    if let Some(shell) = shell_stepped_cylinders(&healed, &opened, thickness)? {
+        return Ok(record::after(shell, &healed, &record::counts(&[b])));
+    }
     let margin = thickness + size * 0.05;
     shell_opened(b, &healed, open, &opened, thickness, margin).map_err(|e| match rim_without_thickness(&healed, &opened, thickness, false) {
         Some(r) => unsupported_shell(&format!(
@@ -597,11 +602,7 @@ fn sphere_open_rim_walls(outer: &mt::Face, inset: &mt::Face, centre: Vec3) -> Re
         let (pa, pb) = (from_p3(from.point()), from_p3(to.point()));
         let k = bit_key(pa, pb);
         if let Some(e) = radials.get(&k) {
-            return if from_p3(e.front().point()).dist(pa) <= from_p3(e.front().point()).dist(pb) {
-                e.clone()
-            } else {
-                e.inverse()
-            };
+            return if from_p3(e.front().point()).dist(pa) <= from_p3(e.front().point()).dist(pb) { e.clone() } else { e.inverse() };
         }
         let e = builder::line(from, to);
         radials.insert(k, e.clone());
@@ -720,6 +721,120 @@ fn shell_barrel(b: &Body, opened: &[usize], thickness: f64) -> Result<Option<Bod
     record::attach(Body::new(solid)?, &[record::Operand::new(b)], Some(provenance), copies).map(Some)
 }
 
+/// A solid of revolution made of coaxial convex cylinders and axial caps/steps. Offsetting the
+/// faces builds a cavity the boolean Cut cannot subtract through the step (#6066); stack the
+/// inset cylinders instead and cut with that.
+fn shell_stepped_cylinders(b: &Body, opened: &[usize], thickness: f64) -> Result<Option<Body>> {
+    use crate::offset::Surf;
+    if b.solid.boundaries().len() != 1 || b.face_count() > 256 || opened.is_empty() {
+        return Ok(None);
+    }
+    let faces: Vec<mt::Face> = b.solid.face_iter().cloned().collect();
+    if opened.iter().any(|i| *i >= faces.len()) {
+        return Ok(None);
+    }
+    let tol = (b.size() * 1e-7).max(1e-9) * 100.0;
+    let surfs: Option<Vec<Surf>> = faces.iter().map(|f| crate::offset::surf_of(f, tol)).collect();
+    let Some(surfs) = surfs else { return Ok(None) };
+    let Some((axis_o, axis, _)) = surfs.iter().find_map(|s| match *s {
+        Surf::Cylinder { o, a, r, convex: true } if r > tol => Some((o, a, r)),
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    let axis_ok = |o: Vec3, a: Vec3| {
+        a.dot(axis).abs() > 1.0 - 1e-9 && {
+            let w = o - axis_o;
+            (w - axis * w.dot(axis)).len() < tol * 10.0 + 1e-6
+        }
+    };
+    let mut radii: Vec<(f64, f64, f64)> = Vec::new(); // (r, lo, hi) along axis
+    // (face, t along axis, n·axis) — n·axis orients the inward move of a closed station.
+    let mut stations: Vec<(usize, f64, f64)> = Vec::new();
+    for (i, s) in surfs.iter().enumerate() {
+        match *s {
+            Surf::Cylinder { o, a, r, convex: true } if r > tol && axis_ok(o, a) => {
+                let Some(face) = faces.get(i) else { return Ok(None) };
+                let Some((lo, hi)) = face_axis_span(face, axis_o, axis) else { return Ok(None) };
+                if let Some(slot) = radii.iter_mut().find(|(rr, ..)| (*rr - r).abs() < tol) {
+                    slot.1 = slot.1.min(lo);
+                    slot.2 = slot.2.max(hi);
+                } else {
+                    radii.push((r, lo, hi));
+                }
+            }
+            Surf::Plane { n, d } if n.dot(axis).abs() > 1.0 - 1e-9 => {
+                let den = n.dot(axis);
+                if den.abs() < 1e-12 {
+                    return Ok(None);
+                }
+                stations.push((i, d / den, den));
+            }
+            _ => return Ok(None),
+        }
+    }
+    if radii.len() < 2 || stations.len() < 2 {
+        return Ok(None);
+    }
+    // Open faces must be axial planes; opening a cylinder wall is a different path (#4010).
+    if opened.iter().any(|i| !stations.iter().any(|(fi, ..)| fi == i)) {
+        return Ok(None);
+    }
+    stations.sort_by(|a, b| a.1.total_cmp(&b.1));
+    stations.dedup_by(|a, b| (a.1 - b.1).abs() < tol);
+    if !stations.iter().any(|(fi, ..)| opened.contains(fi)) {
+        return Ok(None);
+    }
+    let margin = thickness + b.size() * 0.05;
+    // One inset (or pushed) plane per station, shared by both slabs that meet there.
+    let cuts: Vec<f64> =
+        stations.iter().map(|(fi, t, n_axis)| if opened.contains(fi) { *t + margin / *n_axis } else { *t - thickness / *n_axis }).collect();
+    let mut cavity: Option<Body> = None;
+    for (i, w) in stations.windows(2).enumerate() {
+        let (Some(&(_, lo, _)), Some(&(_, hi, _))) = (w.first(), w.get(1)) else { continue };
+        if hi - lo <= tol {
+            continue;
+        }
+        let mid = (lo + hi) * 0.5;
+        let Some(&(r, ..)) = radii.iter().find(|(_, a, b)| *a <= mid + tol && mid - tol <= *b) else {
+            return Ok(None);
+        };
+        let r_in = r - thickness;
+        if r_in <= tol {
+            return Err(KernelError::Invalid("shell thickness leaves no cylinder cavity".into()));
+        }
+        let (Some(&z0), Some(&z1)) = (cuts.get(i), cuts.get(i + 1)) else { return Ok(None) };
+        if z1 - z0 <= tol {
+            return Err(KernelError::Invalid("shell thickness leaves no cavity between the steps".into()));
+        }
+        let base = axis_o + axis * z0;
+        let piece = crate::cylinder(base, axis, r_in, z1 - z0)?;
+        cavity = Some(match cavity {
+            None => piece,
+            Some(acc) => {
+                crate::ops::boolean(&acc, &piece, crate::BoolOp::Union)?.ok_or_else(|| KernelError::Failed("shell: stepped cavity".into()))?
+            }
+        });
+    }
+    let Some(cavity) = cavity else { return Ok(None) };
+    let r = crate::ops::boolean(b, &cavity, crate::BoolOp::Cut)?.ok_or_else(|| KernelError::Failed("the shell removed everything".into()))?;
+    if r.shell_count() != 1 {
+        return Err(unsupported_shell("the stepped shell did not open"));
+    }
+    Ok(Some(r.without_history()))
+}
+
+fn face_axis_span(face: &mt::Face, origin: Vec3, axis: Vec3) -> Option<(f64, f64)> {
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for v in face.vertex_iter() {
+        let t = (from_p3(v.point()) - origin).dot(axis);
+        lo = lo.min(t);
+        hi = hi.max(t);
+    }
+    (lo.is_finite() && hi.is_finite()).then_some((lo, hi))
+}
+
 /// The radius of a convex round (cylinder or torus) that meets an open face tangentially and
 /// is at least `thickness`: the cavity's wall then passes through the rim where the round meets
 /// the open face, leaving nothing between them.
@@ -779,9 +894,8 @@ fn shell_opened(b: &Body, healed: &Body, open: &[Vec3], opened: &[usize], thickn
     let faces: Vec<mt::Face> = healed.solid.face_iter().cloned().collect();
     // Cylindrical open faces (#4010): leave them unmoved so the cavity keeps the bore radius,
     // while every other face moves in. Pushing a hole wall out collapses or misses rim corners.
-    let cyl_open = opened.iter().any(|&fi| {
-        matches!(faces.get(fi).and_then(|f| crate::offset::surf_of(f, tol)), Some(crate::offset::Surf::Cylinder { .. }))
-    });
+    let cyl_open =
+        opened.iter().any(|&fi| matches!(faces.get(fi).and_then(|f| crate::offset::surf_of(f, tol)), Some(crate::offset::Surf::Cylinder { .. })));
     if cyl_open {
         return shell_by_opening(healed, opened, thickness, margin);
     }
@@ -933,17 +1047,13 @@ fn shell_by_opening(b: &Body, opened: &[usize], thickness: f64, reach: f64) -> R
     let size = b.size();
     let tol = (size * 1e-7).max(1e-9) * 100.0;
     let src_faces: Vec<mt::Face> = b.solid.face_iter().cloned().collect();
-    let cyl_open = opened.iter().any(|&fi| {
-        matches!(src_faces.get(fi).and_then(|f| crate::offset::surf_of(f, tol)), Some(crate::offset::Surf::Cylinder { .. }))
-    });
+    let cyl_open =
+        opened.iter().any(|&fi| matches!(src_faces.get(fi).and_then(|f| crate::offset::surf_of(f, tol)), Some(crate::offset::Surf::Cylinder { .. })));
     // Through-hole wall (#4010): keep the open cylinder where it is (shift 0) and move every
     // other face in. The cavity then has the same bore as the solid, so cutting it out leaves
     // no tube wall — matching an inset box less the hole.
-    let closed = if cyl_open {
-        offset_planar(b, |fi, _| if opened.contains(&fi) { 0.0 } else { -thickness })?
-    } else {
-        offset_planar(b, |_, _| -thickness)?
-    };
+    let closed =
+        if cyl_open { offset_planar(b, |fi, _| if opened.contains(&fi) { 0.0 } else { -thickness })? } else { offset_planar(b, |_, _| -thickness)? };
     if cyl_open {
         let r = crate::ops::boolean(b, &closed, crate::BoolOp::Cut)?.ok_or_else(|| KernelError::Failed("the shell removed everything".into()))?;
         return Ok(r.without_history());
@@ -1086,6 +1196,34 @@ mod rim_preflight_tests {
         assert!(rim_without_thickness(&combined, &faces, 2.0, true).is_none());
     }
 
+    /// #6066: a flange with a smaller tube on top shells when the tube top is opened; inward
+    /// used to refuse the step as a wall cross or fail the cavity cut.
+    #[test]
+    fn shell_flange_with_a_tube_opens_at_the_top() {
+        use std::f64::consts::PI;
+        let flange = crate::cylinder(Vec3::ZERO, Vec3::Z, 25.0, 6.0).unwrap();
+        let tube = crate::cylinder(Vec3::new(0.0, 0.0, 6.0), Vec3::Z, 17.5, 30.0).unwrap();
+        let u = crate::boolean(&flange, &tube, crate::BoolOp::Union).unwrap().unwrap();
+        let before = crate::measure(&u).unwrap().volume;
+        let s = shell(&u, &[Vec3::new(0.0, 0.0, 36.0)], 2.0).expect("shell");
+        assert!(s.validity().is_empty(), "{:?}", s.validity());
+        assert_eq!(s.shell_count(), 1);
+        let vol = crate::measure(&s).unwrap().volume;
+        // Bottom plate + flange wall + step shelf + tube wall (top open).
+        let want = PI * 25.0 * 25.0 * 2.0
+            + PI * (25.0 * 25.0 - 23.0 * 23.0) * 4.0
+            + PI * (23.0 * 23.0 - 15.5 * 15.5) * 2.0
+            + PI * (17.5 * 17.5 - 15.5 * 15.5) * 30.0;
+        assert!(vol.is_finite() && vol > 0.0 && vol < before, "before {before}, shell {vol}");
+        assert!((vol - want).abs() < 0.05 * want, "shell {vol}, want ~{want}");
+        // Opening the flange bottom must also build (same stepped cavity path).
+        let bottom = shell(&u, &[Vec3::new(0.0, 0.0, 0.0)], 2.0).expect("shell bottom");
+        assert!(bottom.validity().is_empty(), "{:?}", bottom.validity());
+        assert_eq!(bottom.shell_count(), 1);
+        let bv = crate::measure(&bottom).unwrap().volume;
+        assert!(bv.is_finite() && bv > 0.0 && bv < before, "before {before}, bottom shell {bv}");
+    }
+
     /// #1969: shelling a sphere used to expand the open face across every patch (same surface)
     /// and cut the body away; one patch open leaves a hollow ball.
     #[test]
@@ -1142,9 +1280,7 @@ mod rim_preflight_tests {
     fn shell_half_revolve_cut_by_box_names_wall_cross() {
         use solidcraft_geom::{Loop2, Plane, Region2, Vec2};
         let rect = Loop2::polygon(&[Vec2::new(7.5, 0.0), Vec2::new(25.0, 0.0), Vec2::new(25.0, 5.0), Vec2::new(7.5, 5.0)]);
-        let rev = crate::revolve(&Plane::XZ, &[Region2 { outer: rect, holes: vec![] }], Vec2::ZERO, Vec2::Y, std::f64::consts::PI)
-            .unwrap()
-            .remove(0);
+        let rev = crate::revolve(&Plane::XZ, &[Region2 { outer: rect, holes: vec![] }], Vec2::ZERO, Vec2::Y, std::f64::consts::PI).unwrap().remove(0);
         let cut = crate::box_solid(Vec3::new(-25.0, 0.0, -2.5), Vec3::new(-7.5, 22.5, 20.0)).unwrap();
         let u = crate::boolean(&rev, &cut, crate::BoolOp::Cut).unwrap().unwrap();
         let err = shell(&u, &[Vec3::new(16.25, 0.0, -2.5)], 2.0).expect_err("thick shell");
@@ -1189,4 +1325,3 @@ mod rim_preflight_tests {
         assert!(vol.is_finite() && vol > 0.0);
     }
 }
-
