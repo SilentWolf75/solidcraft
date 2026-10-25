@@ -928,6 +928,14 @@ fn shell_opened(b: &Body, healed: &Body, open: &[Vec3], opened: &[usize], thickn
     {
         return Ok(x);
     }
+    // A closed hollow (two shells) means the open face never punched through — common when a
+    // box sits on a cylinder and a side face is opened (#6352). Retry by sweeping the opening.
+    if matches!(&r, Ok(Some(body)) if body.shell_count() != 1)
+        && let Ok(x) = shell_by_opening(healed, opened, thickness, margin)
+        && x.shell_count() == 1
+    {
+        return Ok(x);
+    }
     match r {
         Ok(Some(r)) => {
             // Over `[healed]`, the cavity's faces offsets of the faces they line; then over `[b]`.
@@ -1058,11 +1066,24 @@ fn shell_by_opening(b: &Body, opened: &[usize], thickness: f64, reach: f64) -> R
         let r = crate::ops::boolean(b, &closed, crate::BoolOp::Cut)?.ok_or_else(|| KernelError::Failed("the shell removed everything".into()))?;
         return Ok(r.without_history());
     }
-    // Planar opens: all-inward cavity, then a prism through each open face.
-    let faces: Vec<mt::Face> = closed.solid.face_iter().cloned().collect();
+    // Planar opens: all-inward cavity, then a prism through each open face. Prefer the cavity's
+    // matching face when topology is preserved; otherwise hollow first and cut a slot from the
+    // source face (#6352: offset of a box on a cylinder drops faces, so cavity indices no longer
+    // match, and unioning a slot into the cavity fails where it meets the cylinder).
+    let closed_faces: Vec<mt::Face> = closed.solid.face_iter().cloned().collect();
+    let index_ok = closed_faces.len() == src_faces.len();
+    if !index_ok {
+        let mut r = crate::ops::boolean(b, &closed, crate::BoolOp::Cut)?.ok_or_else(|| KernelError::Failed("the shell removed everything".into()))?;
+        for fi in opened {
+            let f = src_faces.get(*fi).ok_or_else(|| KernelError::Failed("shell: open face".into()))?;
+            let slot = opening_slot(f, thickness, reach)?;
+            r = crate::ops::boolean(&r, &slot, crate::BoolOp::Cut)?.ok_or_else(|| KernelError::Failed("shell: opening".into()))?;
+        }
+        return Ok(r.without_history());
+    }
     let mut cavity = closed.clone();
     for fi in opened {
-        let f = faces.get(*fi).ok_or_else(|| KernelError::Failed("shell: open face".into()))?;
+        let f = closed_faces.get(*fi).ok_or_else(|| KernelError::Failed("shell: open face".into()))?;
         let mt::Surface::Plane(pl) = f.oriented_surface() else {
             return Err(unsupported_shell("the open face must be planar here"));
         };
@@ -1070,13 +1091,63 @@ fn shell_by_opening(b: &Body, opened: &[usize], thickness: f64, reach: f64) -> R
         let n = Vec3::new(n.x, n.y, n.z).normalized().ok_or_else(|| KernelError::Failed("shell: open face normal".into()))?;
         let prism = guard("shell opening", || {
             let solid: Solid = builder::tsweep(f, v3(n * (thickness + reach)));
-            Ok(solid)
+            Ok(Body::new(solid)?)
         })?;
-        let prism = Body::new(prism)?;
         cavity = crate::ops::boolean(&cavity, &prism, crate::BoolOp::Union)?.ok_or_else(|| KernelError::Failed("shell: opening".into()))?;
     }
     let r = crate::ops::boolean(b, &cavity, crate::BoolOp::Cut)?.ok_or_else(|| KernelError::Failed("the shell removed everything".into()))?;
     Ok(r.without_history())
+}
+
+/// A rectangular bar through a planar face, slightly smaller than the face so its sides stay
+/// clear of neighbouring walls (and of a cylinder a box sits on).
+fn opening_slot(face: &mt::Face, thickness: f64, reach: f64) -> Result<Body> {
+    let mt::Surface::Plane(pl) = face.oriented_surface() else {
+        return Err(unsupported_shell("the open face must be planar here"));
+    };
+    let n = pl.normal();
+    let n = Vec3::new(n.x, n.y, n.z).normalized().ok_or_else(|| KernelError::Failed("shell: open face normal".into()))?;
+    let mut pts: Vec<Vec3> = face.vertex_iter().map(|v| from_p3(v.point())).collect();
+    if pts.len() < 3 {
+        return Err(KernelError::Failed("shell: open face has no polygon".into()));
+    }
+    pts.dedup_by(|a, b| a.dist(*b) < 1e-9);
+    let centre = pts.iter().fold(Vec3::ZERO, |a, p| a + *p) * (1.0 / pts.len() as f64);
+    let u = n.any_perp();
+    let v = n.cross(u);
+    let mut u0 = f64::INFINITY;
+    let mut u1 = f64::NEG_INFINITY;
+    let mut v0 = f64::INFINITY;
+    let mut v1 = f64::NEG_INFINITY;
+    for p in &pts {
+        let w = *p - centre;
+        let (uu, vv) = (w.dot(u), w.dot(v));
+        u0 = u0.min(uu);
+        u1 = u1.max(uu);
+        v0 = v0.min(vv);
+        v1 = v1.max(vv);
+    }
+    // Keep clear of edges where the face meets neighbouring walls or a cylinder under a box.
+    let pad = ((u1 - u0).min(v1 - v0) * 0.2).clamp(thickness.max(1.0), (u1 - u0).min(v1 - v0) * 0.35);
+    if u1 - u0 <= 2.0 * pad || v1 - v0 <= 2.0 * pad {
+        return Err(unsupported_shell("the open face is too small to slot through"));
+    }
+    // Through the wall and well into the cavity (past the inset face).
+    let inset = thickness * 2.0;
+    let out = inset + thickness + reach;
+    // World AABB of the face-aligned slot bar (clear of neighbouring walls).
+    let mut lo = Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+    let mut hi = Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for su in [u0 + pad, u1 - pad] {
+        for sv in [v0 + pad, v1 - pad] {
+            for sn in [-inset, out - inset] {
+                let p = centre + u * su + v * sv + n * sn;
+                lo = Vec3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+                hi = Vec3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+            }
+        }
+    }
+    crate::box_solid(lo, hi)
 }
 
 fn unsupported_shell(m: &str) -> KernelError {
@@ -1194,6 +1265,22 @@ mod rim_preflight_tests {
         let combined = crate::boolean(&rounded, &distant, crate::BoolOp::Union).unwrap().unwrap();
         let faces: Vec<_> = (0..combined.solid.face_iter().count()).collect();
         assert!(rim_without_thickness(&combined, &faces, 2.0, true).is_none());
+    }
+
+    /// #6352: a cylinder with a box joined on top shells when a box side is opened; the opening
+    /// prism used to be taken from the inset cavity by face index, which no longer matched.
+    #[test]
+    fn shell_cylinder_with_a_box_on_top() {
+        let cyl = crate::cylinder(Vec3::ZERO, Vec3::Z, 15.0, 30.0).unwrap();
+        let box_top = crate::box_solid(Vec3::new(-10.0, -14.0, 30.0), Vec3::new(10.0, 14.0, 40.0)).unwrap();
+        let u = crate::boolean(&cyl, &box_top, crate::BoolOp::Union).unwrap().unwrap();
+        let before = crate::measure(&u).unwrap().volume;
+        let s = shell(&u, &[Vec3::new(2.5, -14.0, 35.0)], 2.0).expect("shell");
+        assert!(s.validity().is_empty(), "{:?}", s.validity());
+        assert_eq!(s.shell_count(), 1);
+        let vol = crate::measure(&s).unwrap().volume;
+        assert!(vol.is_finite() && vol > 0.0 && vol < before, "before {before}, shell {vol}");
+        s.tessellate(0.5).expect("mesh shell");
     }
 
     /// #6066: a flange with a smaller tube on top shells when the tube top is opened; inward
