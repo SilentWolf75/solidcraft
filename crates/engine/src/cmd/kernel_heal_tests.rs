@@ -58,6 +58,45 @@ fn shell_of_a_revolved_sphere() {
     assert!(vol > 0.7 * closed && vol < closed, "shell {vol}, closed hollow {closed}");
 }
 
+/// #6564: two boxes in the same place — a face pick for the second must hollow B, not the
+/// already-shelled twin (equal-distance body picks used to prefer the older body).
+#[test]
+fn shell_second_box_at_the_same_place() {
+    let before_b = 40.0 * 30.0 * 20.0;
+    // First shelled by its top (gone): the pick must still find B.
+    {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 40, "width": 30, "height": 20, "body_name": "A"}));
+        run(&mut s, "solid.shell", json!({"body": "A", "faces": [[20, 15, 20]], "thickness": 2}));
+        let v_a = run(&mut s, "inspect.measure", json!({}))["bodies"].as_array().unwrap().iter().find(|b| b["name"] == "A").unwrap()["volume_mm3"]
+            .as_f64()
+            .unwrap();
+        run(&mut s, "solid.box", json!({"length": 40, "width": 30, "height": 20, "body_name": "B"}));
+        run(&mut s, "solid.shell", json!({"faces": [[20, 15, 20]], "thickness": 2, "tangent_chain": true}));
+        let after = run(&mut s, "inspect.measure", json!({}));
+        let a = after["bodies"].as_array().unwrap().iter().find(|b| b["name"] == "A").unwrap()["volume_mm3"].as_f64().unwrap();
+        let b = after["bodies"].as_array().unwrap().iter().find(|b| b["name"] == "B").unwrap()["volume_mm3"].as_f64().unwrap();
+        assert!((a - v_a).abs() < 1e-3, "A should stay as shelled: {a} vs {v_a}");
+        assert!(b < before_b * 0.75 && b > 0.0, "B should be hollow: {b}");
+    }
+    // First shelled by a side (top remains on both): the shared top must pick B, not re-shell A.
+    {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 40, "width": 30, "height": 20, "body_name": "A"}));
+        run(&mut s, "solid.shell", json!({"body": "A", "faces": [[40, 15, 10]], "thickness": 2}));
+        let v_a = run(&mut s, "inspect.measure", json!({}))["bodies"].as_array().unwrap().iter().find(|b| b["name"] == "A").unwrap()["volume_mm3"]
+            .as_f64()
+            .unwrap();
+        run(&mut s, "solid.box", json!({"length": 40, "width": 30, "height": 20, "body_name": "B"}));
+        run(&mut s, "solid.shell", json!({"faces": [[20, 15, 20]], "thickness": 2}));
+        let after = run(&mut s, "inspect.measure", json!({}));
+        let a = after["bodies"].as_array().unwrap().iter().find(|b| b["name"] == "A").unwrap()["volume_mm3"].as_f64().unwrap();
+        let b = after["bodies"].as_array().unwrap().iter().find(|b| b["name"] == "B").unwrap()["volume_mm3"].as_f64().unwrap();
+        assert!((a - v_a).abs() < 1e-3, "A should stay as shelled: {a} vs {v_a}");
+        assert!(b < before_b * 0.75 && b > 0.0, "B should be hollow: {b}");
+    }
+}
+
 /// #1972: after a sphere is split, shelling one half by name must hollow that half and leave
 /// the other solid — a face pick on the cut alone used to hit the other piece.
 #[test]
@@ -68,11 +107,7 @@ fn shell_named_half_sphere_leaves_the_other_solid() {
     let before = run(&mut s, "inspect.measure", json!({}));
     let v_ball = before["bodies"].as_array().unwrap().iter().find(|b| b["name"] == "Ball").unwrap()["volume_mm3"].as_f64().unwrap();
     let v_other = before["bodies"].as_array().unwrap().iter().find(|b| b["name"] == "Ball (1)").unwrap()["volume_mm3"].as_f64().unwrap();
-    run(
-        &mut s,
-        "solid.shell",
-        json!({"body": "Ball (1)", "faces": [[5.09, 3.52, 0.0]], "thickness": 2, "tangent_chain": true}),
-    );
+    run(&mut s, "solid.shell", json!({"body": "Ball (1)", "faces": [[5.09, 3.52, 0.0]], "thickness": 2, "tangent_chain": true}));
     let after = run(&mut s, "inspect.measure", json!({}));
     let bodies = after["bodies"].as_array().unwrap();
     let ball = bodies.iter().find(|b| b["name"] == "Ball").unwrap()["volume_mm3"].as_f64().unwrap();

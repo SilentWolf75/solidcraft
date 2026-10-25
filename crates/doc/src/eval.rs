@@ -3085,6 +3085,10 @@ fn body_at(st: &ModelState, body: &Option<crate::BodyName>, points: &[Vec3]) -> 
         return st.bodies.iter().position(|b| &b.name == n).ok_or_else(|| DocError::Unknown(format!("body `{n}`")));
     }
     let p = points.first().ok_or_else(|| DocError::Invalid("no faces selected".into()))?;
+    // Among bodies with a face at the pick, take the nearest. When several sit at the same
+    // place (#6564: a new solid under an already-shelled twin), equal distances used to pick
+    // the oldest body — whose open face may be gone, or whose second shell fails. Prefer the
+    // newest body on a distance tie.
     st.bodies
         .iter()
         .enumerate()
@@ -3093,7 +3097,7 @@ fn body_at(st: &ModelState, body: &Option<crate::BodyName>, points: &[Vec3]) -> 
             let (d, _) = crate::appearance::nearest_face(b, *p)?;
             (d <= crate::appearance::pick_tolerance(b)).then_some((d, i))
         })
-        .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
+        .min_by(|a, b| a.0.total_cmp(&b.0).then(b.1.cmp(&a.1)))
         .map(|(_, i)| i)
         .ok_or_else(|| DocError::Invalid("no face at the pick".into()))
 }

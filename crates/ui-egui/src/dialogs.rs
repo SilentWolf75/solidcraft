@@ -3996,8 +3996,10 @@ fn face_sel_among(s: &Session, p0: Vec3, only: Option<&str>) -> Option<Sel> {
     }
     let st = s.world_state();
     let frames = stored_frames(s);
-    let mut best: Option<(f64, &solidcraft_engine::doc::ModelBody, usize, Vec3)> = None;
-    for b in &st.bodies {
+    // (distance, body index, body, face, point) — on a distance tie prefer the newest body
+    // so a solid under an already-shelled twin at the same place is picked (#6564).
+    let mut best: Option<(f64, usize, &solidcraft_engine::doc::ModelBody, usize, Vec3)> = None;
+    for (bi, b) in st.bodies.iter().enumerate() {
         // Hidden bodies stay out of refill picks so a coincident cut face of a hidden half
         // does not steal the visible one (#1972).
         if !s.body_visible(&b.name) {
@@ -4011,12 +4013,16 @@ fn face_sel_among(s: &Session, p0: Vec3, only: Option<&str>) -> Option<Sel> {
         for (t, f) in m.triangles.iter().zip(&m.tri_face) {
             let Some([a, bb, c]) = m.tri(t) else { continue };
             let d = crate::preview::point_triangle_dist(p, a, bb, c);
-            if best.as_ref().is_none_or(|(bd, _, _, _)| d < *bd) {
-                best = Some((d, b, *f as usize, p));
+            let take = match &best {
+                None => true,
+                Some((bd, bbi, ..)) => d < *bd || (d <= *bd + 1e-12 && bi > *bbi),
+            };
+            if take {
+                best = Some((d, bi, b, *f as usize, p));
             }
         }
     }
-    let (d, body, index, point) = best?;
+    let (d, _, body, index, point) = best?;
     let surface = kernel::guard("refill face surface", || Ok(kernel::face_surface(&body.body, index))).ok().flatten();
     // A curved face's viewport pick can be a full chord tolerance from the reference
     // facets. Planar and unclassified faces keep the tight limit so a stale pick cannot
