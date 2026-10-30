@@ -7,7 +7,7 @@ pub(crate) fn ellipsize_middle(ui: &Ui, text: &str, font: egui::FontId, max_widt
     if !(max_width.is_finite() && max_width > 0.0) {
         return String::new();
     }
-    let width = |s: &str| ui.fonts_mut(|fonts| fonts.layout_no_wrap(s.to_owned(), font.clone(), egui::Color32::WHITE).size().x);
+    let width = |s: &str| ui.fonts_mut(|fonts| fonts.layout_no_wrap(s.to_owned(), font.clone(), ui.visuals().text_color()).size().x);
     if width(text) <= max_width + 0.5 {
         return text.to_owned();
     }
