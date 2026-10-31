@@ -214,9 +214,9 @@ pub(crate) mod quick_measure;
 mod quick_measure_tests;
 pub mod recovery_ui;
 pub mod ref_images;
-pub mod resume_ui;
 mod render_ui;
 pub mod render_workspace;
+pub mod resume_ui;
 #[cfg(test)]
 mod revolve_edit_tests;
 #[cfg(test)]
