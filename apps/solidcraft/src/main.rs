@@ -1126,9 +1126,7 @@ fn main() -> eframe::Result {
                     })
                     .collect();
                 let info = rs.adapter.get_info();
-                if !app.preferences.graphics_adapter.is_empty()
-                    && !info.name.eq_ignore_ascii_case(app.preferences.graphics_adapter.as_str())
-                {
+                if !app.preferences.graphics_adapter.is_empty() && !info.name.eq_ignore_ascii_case(app.preferences.graphics_adapter.as_str()) {
                     eprintln!(
                         "SolidCraft graphics: preferred adapter {:?} was not used; using {:?} instead",
                         app.preferences.graphics_adapter, info.name

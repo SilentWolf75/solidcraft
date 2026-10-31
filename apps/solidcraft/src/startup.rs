@@ -152,9 +152,7 @@ pub fn choose_adapter(adapters: &[AdapterChoice], environment: Option<&str>, pre
             return Some(index);
         }
     }
-    let Some(name) = preference.filter(|s| !s.is_empty()) else {
-        return None;
-    };
+    let name = preference.filter(|s| !s.is_empty())?;
     let find = |pred: &dyn Fn(&AdapterChoice) -> bool, only_compatible: bool| {
         adapters.iter().enumerate().find(|(_, a)| (!only_compatible || a.compatible) && pred(a)).map(|(i, _)| i)
     };
